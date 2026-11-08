@@ -1,0 +1,23 @@
+model_list:
+  - model_name: primary
+    litellm_params:
+      model: openai/mock-fast
+      api_base: http://127.0.0.1:9000/v1
+      api_key: sk-upstream-SENTINELUP7f3a2b
+  - model_name: secondary
+    litellm_params:
+      model: openai/mock-fast
+      api_base: http://127.0.0.1:9010/v1
+      api_key: sk-upstream-SENTINELUP7f3a2b
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  disable_spend_logs: true
+
+litellm_settings:
+  set_verbose: false
+  json_logs: true
+  drop_params: true
+  num_retries: 1
+  request_timeout: 10
+  fallbacks: [{"primary": ["secondary"]}]

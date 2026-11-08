@@ -1,0 +1,40 @@
+{
+  "$schema": "https://www.getbifrost.ai/schema",
+  "client": {
+    "enable_logging": false
+  },
+  "config_store": {
+    "enabled": false
+  },
+  "logs_store": {
+    "enabled": false
+  },
+  "framework": {
+    "pricing": {
+      "pricing_url": "file:///app/offline/pricing.json",
+      "model_parameters_url": "file:///app/offline/model-parameters.json",
+      "pricing_sync_interval": 86400,
+      "mcp_library_sync_interval": 0
+    }
+  },
+  "providers": {
+    "mocka": {
+      "custom_provider_config": {
+        "base_provider_type": "openai"
+      },
+      "network_config": {
+        "base_url": "http://127.0.0.1:9000"
+      },
+      "keys": [
+        {
+          "name": "ka",
+          "value": "sk-upstream-SENTINELUP7f3a2b",
+          "models": [
+            "*"
+          ],
+          "weight": 1.0
+        }
+      ]
+    }
+  }
+}

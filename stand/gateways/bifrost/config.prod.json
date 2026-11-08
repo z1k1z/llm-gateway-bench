@@ -1,0 +1,90 @@
+{
+  "$schema": "https://www.getbifrost.ai/schema",
+  "client": {
+    "enable_logging": true,
+    "enforce_auth_on_inference": true
+  },
+  "config_store": {
+    "enabled": true,
+    "type": "sqlite",
+    "config": {
+      "path": "/app/data/state/config.db"
+    }
+  },
+  "logs_store": {
+    "enabled": true,
+    "type": "sqlite",
+    "config": {
+      "path": "/app/data/state/logs.db"
+    }
+  },
+  "framework": {
+    "pricing": {
+      "pricing_url": "file:///app/offline/pricing.json",
+      "model_parameters_url": "file:///app/offline/model-parameters.json",
+      "pricing_sync_interval": 86400,
+      "mcp_library_sync_interval": 0
+    }
+  },
+  "providers": {
+    "mocka": {
+      "custom_provider_config": {
+        "base_provider_type": "openai"
+      },
+      "network_config": {
+        "base_url": "http://127.0.0.1:9000"
+      },
+      "keys": [
+        {
+          "name": "ka",
+          "value": "sk-upstream-SENTINELUP7f3a2b",
+          "models": [
+            "*"
+          ],
+          "weight": 1.0
+        }
+      ]
+    }
+  },
+  "governance": {
+    "auth_config": {
+      "admin_username": "env.BIFROST_ADMIN_USERNAME",
+      "admin_password": "env.BIFROST_ADMIN_PASSWORD",
+      "is_enabled": true,
+      "disable_auth_on_inference": true
+    },
+    "virtual_keys": [
+      {
+        "id": "vk-bench",
+        "name": "bench",
+        "value": "env.BENCH_VK",
+        "is_active": true,
+        "provider_configs": [
+          {
+            "provider": "mocka",
+            "allowed_models": [
+              "*"
+            ],
+            "key_ids": [
+              "*"
+            ],
+            "weight": 1
+          }
+        ]
+      }
+    ],
+    "pricing_overrides": [
+      {
+        "id": "7d0c6a52-4f1e-4b8e-9a51-0b3f1c2d9e01",
+        "name": "mock prices",
+        "scope_kind": "global",
+        "match_type": "wildcard",
+        "pattern": "mock-*",
+        "request_types": [
+          "chat_completion"
+        ],
+        "pricing_patch": "{\"input_cost_per_token\": 1e-06, \"output_cost_per_token\": 2e-06}"
+      }
+    ]
+  }
+}
