@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Bifrost не запускается, если pricing_url недоступен, а отключить
-# синхронизацию прайсинга нельзя — только подменить на локальный файл.
-# Скачиваем датасеты один раз; дальше гейтвей читает их с диска,
-# и фоновая синхронизация не влияет на замеры.
+# bifrost без доступного pricing_url не стартует, кладем прайсинг локально
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 curl -fsSL -o pricing.json          https://getbifrost.ai/datasheet

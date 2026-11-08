@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
-"""Харнесс нагрузки для замера LLM-гейтвеев.
-
-Считает то, чего нет в вендорских бенчмарках: TTFT по первому непустому
-токену, а не по заголовкам ответа. Стандартные нагрузчики мерят время до
-заголовков, которые и гейтвей, и провайдер отдают сразу, — поэтому TTFT
-у них всегда выходит близким к нулю и ни о чём не говорит.
-
-Каждый замер повторяется N раз. В отчёт идёт медиана по повторам и разброс
-min-max: один прогон публиковать нельзя.
-"""
+# нагрузчик для гейтвеев. TTFT считаем по первому непустому токену,
+# по заголовкам он у всех около нуля
 
 import argparse
 import asyncio
@@ -30,7 +22,6 @@ PROMPT = (
 
 
 def percentile(values, q):
-    """Перцентиль по методу nearest-rank. Пустой список -> None."""
     if not values:
         return None
     s = sorted(values)
@@ -125,7 +116,6 @@ async def call_complete(client, url, model, key, timeout):
 
 
 async def run_shard(url, model, key, mode, timeout, concurrency, count):
-    """Закрытая модель нагрузки: ровно `concurrency` воркеров до `count` запросов."""
     limits = httpx.Limits(
         max_connections=concurrency + 4,
         max_keepalive_connections=concurrency + 4,
@@ -148,7 +138,6 @@ async def run_shard(url, model, key, mode, timeout, concurrency, count):
 
         await asyncio.gather(*[worker() for _ in range(concurrency)])
 
-    # Кортежи, а не объекты: между процессами это уходит через pickle.
     return [(r.ttft, r.total, r.inter, r.status, r.err, r.tokens) for r in results]
 
 
@@ -157,16 +146,7 @@ def _shard_entry(payload):
 
 
 def run_batch(args, count):
-    """Разбивает нагрузку на `processes` процессов.
-
-    Один процесс Python упирается в разбор SSE примерно на 300 rps: при 68
-    событиях на запрос это около 19 тысяч разборов JSON в секунду. Если
-    нагрузчик сам стал узким местом, замер показывает его потолок, а не
-    потолок гейтвея — именно на этом горят публичные бенчмарки. Поэтому
-    процессов несколько, а перед публикацией чисел пропускной способности
-    надо проверить командой saturate, что у контрольной группы есть запас
-    над лучшим из гейтвеев.
-    """
+    # один процесс python упирается в разбор SSE где-то на 300 rps
     procs = max(1, args.processes)
     url = args.url.rstrip("/") + "/chat/completions"
     per_conc = max(1, args.concurrency // procs)
@@ -230,7 +210,6 @@ def summarize(results, wall):
 
 
 def aggregate(repeats):
-    """Медиана по повторам плюс разброс min-max для каждой метрики."""
     out = {}
     for group in ("ttft_ms", "total_ms", "inter_token_ms"):
         out[group] = {}

@@ -2,3 +2,4 @@ stand/results/
 stand/gateways/bifrost/offline/*.json
 stand/gateways/bifrost/data/
 stand/gateways/newapi/data/
+__pycache__/

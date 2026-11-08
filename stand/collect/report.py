@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Собирает results/*.json в markdown-таблицы для статьи.
-
-Запуск: python3 collect/report.py results > results/REPORT.md
-
-Добавленная задержка считается как разница с контрольной группой — без неё
-абсолютные числа гейтвеев ни о чём не говорят, потому что в них сидит
-и задержка мока, и накладные расходы самого харнесса.
-"""
+# python3 collect/report.py results > results/REPORT.md
 
 import json
 import os
@@ -29,7 +22,6 @@ def load(path):
 
 
 def spread(node):
-    """'25.15 (24.37–25.22)' из {median,min,max}."""
     if not node:
         return "—"
     return f"{node['median']:.1f} ({node['min']:.1f}–{node['max']:.1f})"
@@ -66,7 +58,7 @@ def main():
     out = []
     out.append("# Результаты стенда\n")
 
-    # --- контрольная группа
+    # контрольная группа
     out.append("## Контрольная группа: напрямую в мок, без гейтвея\n")
     out.append("| режим | профиль мока | TTFT p50, мс | total p50, мс | RPS |")
     out.append("|---|---|---|---|---|")
@@ -82,7 +74,7 @@ def main():
             )
     out.append("")
 
-    # --- главная таблица: профили против гейтвеев
+    # главная таблица: профили против гейтвеев
     out.append("## TTFT на стриминге: bare против prod против keys\n")
     out.append(
         "Главное число статьи. Если разница между профилями одного гейтвея "
@@ -121,7 +113,7 @@ def main():
                 )
         out.append("")
 
-    # --- нестриминг
+    # нестриминг
     out.append("## Полное время ответа, нестриминг\n")
     out.append("| гейтвей | профиль | профиль мока | total p50, мс | total p99, мс |")
     out.append("|---|---|---|---|---|")
@@ -137,7 +129,7 @@ def main():
                 )
     out.append("")
 
-    # --- пропускная способность и память
+    # пропускная способность и память
     out.append("## Пропускная способность и память\n")
     out.append(
         "Если RPS гейтвея близок к контролю, упёрлись в нагрузчик, а не в "
@@ -173,7 +165,7 @@ def main():
             )
     out.append("")
 
-    # --- отказы
+    # отказы
     faults = sorted(glob(os.path.join(root, "faults-*.json")))
     if faults:
         out.append("## Поведение при отказах апстрима\n")
@@ -194,7 +186,7 @@ def main():
                 )
         out.append("")
 
-    # --- фолбэк
+    # фолбэк
     fbs = sorted(glob(os.path.join(root, "fallback-*.json")))
     if fbs:
         out.append("## Фолбэк mock-a → mock-b\n")
@@ -209,7 +201,7 @@ def main():
                 )
         out.append("")
 
-    # --- безопасность
+    # безопасность
     sec = sorted(glob(os.path.join(root, "security-*.json")))
     if sec:
         out.append("## Безопасность из коробки\n")
@@ -248,7 +240,7 @@ def main():
             )
         out.append("")
         out.append(
-            "Числа в колонках утечек — сколько раз маркер встретился открытым текстом "
+            "Числа в колонках утечек: сколько раз маркер встретился открытым текстом "
             "(в БД считаются и файлы WAL). 0 значит, что открытым текстом его там нет: "
             "хеш или шифрование grep не находит.\n"
         )

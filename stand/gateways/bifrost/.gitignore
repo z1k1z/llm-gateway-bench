@@ -1,4 +1,3 @@
-# Датасеты прайсинга весят 30 МБ, их тянет offline/fetch.sh
 offline/pricing.json
 offline/model-parameters.json
 data/

@@ -1,13 +1,10 @@
-// Мок OpenAI-совместимого апстрима для замеров гейтвеев.
+// Мок OpenAI-совместимого апстрима. Профиль берется из имени модели,
+// свои заголовки гейтвеи не пропускают.
 //
-// Профиль задаётся именем модели, а не заголовком: имя модели гарантированно
-// доходит через любой гейтвей, а кастомные заголовки — нет.
+//	mock-fast       TTFT 20 мс,  2 мс/токен, 64 токена
+//	mock-realistic  TTFT 400 мс, 33 мс/токен, 150 токенов
 //
-//	mock-fast       TTFT 20 мс,  2 мс/токен, 64 токена   — условия вендорских бенчмарков
-//	mock-realistic  TTFT 400 мс, 33 мс/токен, 150 токенов — ~30 tok/s, как настоящая модель
-//
-// Отказы включаются через POST /control и применяются детерминированно
-// (каждый N-й запрос), чтобы прогоны воспроизводились.
+// Отказы через POST /control, каждый N-й запрос.
 package main
 
 import (
@@ -35,11 +32,7 @@ var profiles = map[string]profile{
 	"mock-realistic": {400 * time.Millisecond, 33 * time.Millisecond, 150},
 }
 
-// Фиксированный словарь: количество токенов в ответе должно быть стабильным
-// от прогона к прогону, иначе учёт расходов у гейтвеев будет плавать.
-// mockName попадает первым токеном в каждый ответ: иначе при проверке
-// фолбэка нельзя понять, какой из двух апстримов ответил — гейтвеи
-// переписывают id и не пропускают кастомные заголовки.
+// первым токеном идет mockName, по нему видно, кто ответил при фолбэке
 var mockName = func() string {
 	if v := os.Getenv("MOCK_NAME"); v != "" {
 		return v
@@ -71,8 +64,7 @@ func (f *faults) get() (string, float64) {
 	return f.mode, f.rate
 }
 
-// hit решает, попадает ли текущий запрос под отказ. Детерминированно:
-// при rate=0.25 это каждый четвёртый запрос, без генератора случайных чисел.
+// rate=0.25 значит каждый четвертый
 func (f *faults) hit() (string, bool) {
 	mode, rate := f.get()
 	if mode == "" || mode == "none" || rate <= 0 {
@@ -91,9 +83,7 @@ func (f *faults) hit() (string, bool) {
 
 var state faults
 
-// Уникальный id на каждый ответ: гейтвеи используют его как ключ записи
-// в журнале расходов. С постоянным id LiteLLM складывал тысячи запросов
-// в одну строку SpendLogs, и учёт выглядел сломанным.
+// с одинаковым id litellm сваливал все запросы в одну строку SpendLogs
 var respSeq atomic.Uint64
 
 func respID() string {
@@ -122,9 +112,7 @@ func envDur(name string, def time.Duration) time.Duration {
 }
 
 func resolveProfile(model string) profile {
-	// Гейтвеи часто переписывают имя модели: "openai/mock-fast",
-	// "mock-fast-prod", "custom/mock-realistic". Ищем по подстроке,
-	// realistic проверяем первым — иначе "mock-realistic" поймается как fast.
+	// имя модели гейтвеи переписывают ("openai/mock-fast" и т.п.)
 	for _, name := range []string{"mock-realistic", "mock-fast"} {
 		if strings.Contains(model, name) {
 			return profiles[name]
@@ -179,7 +167,6 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusGatewayTimeout, "api_error", "mock: slept past your timeout")
 			return
 		case "truncate":
-			// Обрыв на середине стрима — отдельная ветка ниже.
 			streamResponse(w, &req, true)
 			return
 		}
@@ -275,8 +262,7 @@ func streamResponse(w http.ResponseWriter, req *chatRequest, truncate bool) {
 	}
 
 	if truncate {
-		// Рвём соединение, не дописав стрим: ни finish_reason, ни [DONE].
-		// Именно так выглядит обрыв апстрима на середине ответа.
+		// рвем без finish_reason и [DONE]
 		if hj, ok := w.(http.Hijacker); ok {
 			if conn, _, err := hj.Hijack(); err == nil {
 				_ = conn.Close()
@@ -288,8 +274,7 @@ func streamResponse(w http.ResponseWriter, req *chatRequest, truncate bool) {
 
 	send(map[string]any{}, "stop")
 
-	// usage отдаём всегда, а не только по stream_options.include_usage:
-	// без него гейтвеи не могут считать расход, а профиль prod его требует.
+	// usage всегда, иначе расходы не посчитать
 	pt := promptTokens(req)
 	usage := map[string]any{
 		"id":      id,
@@ -364,20 +349,17 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "ok")
 	})
-	// Catch-all с логом пути: гейтвеи по-разному дописывают путь к base_url
-	// (одному нужен /v1 в конце, другому нет), и без этого лога ошибка
-	// выглядит как безымянный 404 где-то внутри гейтвея.
+	// чтобы видеть, какой путь гейтвей реально дергает
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("404: %s %s", r.Method, r.URL.Path)
 		writeErr(w, http.StatusNotFound, "invalid_request_error",
-			"мок не обслуживает "+r.URL.Path+" — проверь base_url гейтвея")
+			"мок не обслуживает "+r.URL.Path+", проверь base_url")
 	})
 
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: mux,
-		// Таймауты записи нет намеренно: профиль realistic и режим timeout
-		// держат соединение долго, и сервер не должен рвать его сам.
+		// без WriteTimeout: realistic и timeout держат соединение долго
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.Printf("mock upstream %q на %s, профили: mock-fast, mock-realistic", mockName, addr)

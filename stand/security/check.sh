@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
-# Блок безопасности: пять проверок по каждому гейтвею, все с воспроизводимым
-# результатом. Ничего не чинит, только фиксирует состояние "из коробки".
-#
-# Контекст: в марте 2026 версии litellm 1.82.7 и 1.82.8 в PyPI содержали
-# стилер credentials — ключи мейнтейнера угнали через компрометацию Trivy.
-# Поэтому проверка подписи образа здесь не формальность.
-#
-# Запуск: ./security/check.sh <gateway> <profile>
-#   gateway: litellm | bifrost | newapi
-#   profile: bare | prod | keys
+# ./security/check.sh <gw> <profile>
+# подписи, ключи и промпты в логах и БД, интерфейсы, что отдают без ключа
 
 set -uo pipefail
 
@@ -33,7 +25,7 @@ OUT="${RESULTS:-$STAND/results}/security-$GW-$PROFILE.json"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-jqset() { # накапливаем результат в файле, чтобы не собирать JSON строками
+jqset() {
   local key="$1"; shift
   jq --argjson v "$1" ".$key = \$v" "$WORK/out.json" > "$WORK/tmp.json" && mv "$WORK/tmp.json" "$WORK/out.json"
 }
@@ -45,7 +37,7 @@ echo "=== 1. Подпись образа ==="
 sig_result='{"signed":false,"method":null,"detail":null}'
 case "$GW" in
   litellm)
-    # Ключ пинуем по хешу коммита: тег можно переставить, коммит — нет.
+    # пин по коммиту, тег можно переставить
     KEY="https://raw.githubusercontent.com/BerriAI/litellm/e82a3c646908ba0a6ee0beddc4310d7a6cac4065/cosign.pub"
     if docker run --rm --network host "$COSIGN_IMAGE" verify --key "$KEY" "$IMAGE" > "$WORK/sig.txt" 2>&1; then
       sig_result='{"signed":true,"method":"cosign key, пин по коммиту","detail":null}'
@@ -55,7 +47,6 @@ case "$GW" in
     fi
     ;;
   newapi|bifrost)
-    # Keyless-подпись GitHub Actions: проверяем identity и issuer.
     REPO=$([ "$GW" = newapi ] && echo "QuantumNous/new-api" || echo "maximhq/bifrost")
     if docker run --rm --network host "$COSIGN_IMAGE" verify \
          --certificate-identity-regexp "^https://github.com/$REPO/" \
@@ -76,10 +67,9 @@ echo
 echo "=== 2. Утечки в логах контейнера ==="
 docker logs "$CONTAINER" > "$WORK/logs.txt" 2>&1 || true
 PROMPT_FRAGMENT="зачем в инфраструктуре нужен прокси"
-# Тот же фрагмент в JSON с ensure_ascii: \u0437\u0430... — иначе промпт,
-# сохранённый экранированным, проверка не увидит и покажет ложный ноль.
+# промпт может лежать в JSON как за..., ищем и так
 PROMPT_ESCAPED=$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1])[1:-1])' "зачем в инфраструктуре")
-prompt_hits() { # открытым текстом + экранированный JSON
+prompt_hits() {
   echo $(( $(grep -ao "$PROMPT_FRAGMENT" "$1" | wc -l) + $(grep -aoF "$PROMPT_ESCAPED" "$1" | wc -l) ))
 }
 logs_result=$(jq -cn \
@@ -95,7 +85,7 @@ jqset logs "$logs_result"
 echo
 echo "=== 3. Утечки в базе ==="
 db_result='{"scanned":[],"note":"базы не найдено"}'
-scan_blob() { # grep -a по бинарю: работает и для sqlite, и для дампа postgres
+scan_blob() {
   local f="$1"
   jq -cn --arg file "$(basename "$f")" \
     --argjson size "$(stat -c %s "$f")" \
@@ -114,8 +104,7 @@ case "$GW" in
     ;;
   bifrost)
     found=()
-    # SQLite в режиме WAL держит свежие записи в *.db-wal до чекпойнта:
-    # без него недавние промпты и ключи прошли бы мимо проверки.
+    # свежие записи sqlite лежат в -wal до чекпойнта
     for f in "$STAND"/gateways/bifrost/data/*.db* "$STAND"/gateways/bifrost/data/state/*.db*; do
       [ -f "$f" ] && found+=("$(scan_blob "$f")")
     done
@@ -134,24 +123,18 @@ jqset database "$db_result"
 
 echo
 echo "=== 4. Что торчит наружу ==="
-# Контейнеры в --network host, поэтому docker port bindings всегда пустые.
-# Смотрим, на каком адресе реально слушает порт: * / 0.0.0.0 / [::] значит
-# «все интерфейсы», то есть на VDS гейтвей открыт в интернет.
+# host network, docker port ничего не покажет, смотрим ss
 LISTEN=$(ss -ltnH "( sport = :$PORT )" 2>/dev/null | awk '{print $4}' | sort -u | jq -R . | jq -sc .)
 WIDE=$(echo "$LISTEN" | jq '[.[] | select(test("^(\\*|0\\.0\\.0\\.0|\\[::\\]):"))] | length')
 BINDINGS="$LISTEN"
-# У LiteLLM в prod/keys рядом стоит Postgres: его порт проверяем так же.
 if [ "$GW" = litellm ]; then
   DBL=$(ss -ltnH "( sport = :55432 )" 2>/dev/null | awk '{print $4}' | sort -u | jq -R . | jq -sc .)
   BINDINGS=$(jq -cn --argjson g "$LISTEN" --argjson d "$DBL" '{gateway:$g,postgres:$d}')
 fi
-# Доступность без авторизации: что отдают эндпоинты с пустым Authorization
 declare -A CODES
-# Кроме UI и health — API управления: у каждого гейтвея свой.
 for path in / /v1/models /ui /public/ /health /healthz \
             /api/providers /api/config /model/info /key/list /api/option/ /api/channel/; do
-  # Тип ответа нужен, потому что Bifrost и new-api — SPA: на любой путь
-  # отдают HTML интерфейса с кодом 200. Открытым считаем только JSON.
+  # bifrost и new-api на любой путь отдают html UI, считаем только json
   CODES[$path]=$(curl -s -o /dev/null -m 5 -w '%{http_code} %{content_type}' "http://127.0.0.1:$PORT$path" || true)
 done
 unauth=$(for p in "${!CODES[@]}"; do

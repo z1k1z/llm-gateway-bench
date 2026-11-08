@@ -1,24 +1,9 @@
 #!/usr/bin/env bash
-# Единая точка входа для стенда. Твоя работа — вызвать одну команду
-# и прислать содержимое results/.
-#
-#   ./run.sh prepare                  — сеть, сборка мока и харнесса, подъём mock-a/mock-b
-#   ./run.sh control                  — контрольная группа без гейтвея
-#   ./run.sh saturate                 — где потолок самого стенда (обязательно до выводов)
-#   ./run.sh up       <gw> <profile>  — поднять гейтвей в профиле
-#   ./run.sh bench    <gw> <profile>  — замеры (stream/complete × fast/realistic + пропускная)
-#   ./run.sh faults   <gw>            — 429, 503, обрыв стрима, таймаут
-#   ./run.sh fallback <gw>            — переключение на резервный апстрим
-#   ./run.sh security <gw> <profile>  — блок безопасности
-#   ./run.sh down     <gw>            — погасить гейтвей
-#   ./run.sh all      <profile>       — всё по трём гейтвеям в этом профиле
-#   ./run.sh report                   — собрать results/REPORT.md
-#
-#   gw:      litellm | bifrost | newapi
-#   profile: bare | prod | keys
-#
-# Намеренно без docker compose: плагина может не быть на свежем VDS,
-# а второй непроверенный путь запуска хуже, чем один проверенный.
+# ./run.sh prepare | control | saturate | report
+# ./run.sh up | bench | security <gw> <profile>
+# ./run.sh faults | fallback | down <gw>
+# ./run.sh all <profile>
+# gw: litellm bifrost newapi, profile: bare prod keys (fallback сам поднимается)
 
 set -uo pipefail
 STAND="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,13 +12,8 @@ cd "$STAND"
 # shellcheck disable=SC1091
 set -a; . ./versions.env; . ./sentinels.env; set +a
 
-# Все контейнеры запускаются в host-сети, а апстрим адресуется по loopback.
-# Причина: Bifrost по умолчанию запрещает подключение провайдера к приватным
-# диапазонам RFC 1918, а флаг allow_private_network из config.json он
-# не применяет. Loopback разрешён у всех трёх гейтвеев, поэтому топология
-# получается одинаковой и в замер не попадает NAT docker-моста.
-# Следствие: гейтвеи поднимаются по одному — порты на хосте общие.
-# Каталог результатов можно переопределить, например для пробного прогона.
+# всё в host-сети: bifrost не ходит к провайдеру на 10/172/192.168,
+# а allow_private_network из конфига не берёт. loopback пускают все трое
 export RESULTS="${RESULTS:-$STAND/results}"
 mkdir -p "$RESULTS"
 
@@ -41,14 +21,10 @@ CONC="${CONC:-8}"        # латентный режим
 CONC_HI="${CONC_HI:-64}" # пропускной режим
 REQS="${REQS:-120}"
 REPEATS="${REPEATS:-5}"
-# Профиль realistic — 5,35 с на запрос. С теми же 120×5 прогон растянулся бы
-# на часы, поэтому для него отдельные счётчики. Перцентили p95 на 48 запросах
-# ещё осмысленны, p99 по нему не публикуем.
+# realistic это ~5.35 с на запрос, поэтому запросов меньше, p99 не смотрим
 REQS_SLOW="${REQS_SLOW:-48}"
 REPEATS_SLOW="${REPEATS_SLOW:-3}"
-# Пропускные прогоны — в несколько процессов. На одном процессе очередь
-# внутри самого харнесса раздувает TTFT (проверено: 51 мс против 29 мс
-# при тех же 64 соединениях), и замер показывает нагрузчик, а не гейтвей.
+# в один процесс нагрузчик сам раздувает TTFT (51 мс против 29)
 PROCS="${PROCS:-4}"
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
@@ -61,8 +37,6 @@ gw_port() {
   esac
 }
 
-# Имя модели у каждого гейтвея своё: LiteLLM берёт model_name из конфига,
-# Bifrost требует префикс провайдера, new-api — алиас из мастера.
 gw_model() {
   case "$1" in
     litellm) echo "mock-$2" ;;
@@ -71,9 +45,7 @@ gw_model() {
   esac
 }
 
-# В профиле keys клиент ходит виртуальным ключом с бюджетом, как в проде,
-# а не мастер-ключом администратора. Bifrost с config_store (prod) без
-# виртуального ключа инференс не пускает, поэтому ему ключ нужен и в prod.
+# bifrost с config_store без VK не пускает, поэтому VK и в prod
 gw_key() {
   if [ "${2:-}" = keys ] && [ "$1" != newapi ]; then echo "$BENCH_VK"; return; fi
   if [ "$1" = bifrost ] && { [ "${2:-}" = prod ] || [ "${2:-}" = fallback ]; }; then
@@ -83,7 +55,7 @@ gw_key() {
     litellm|bifrost) echo "$MASTER_KEY" ;;
     newapi)
       local f="$STAND/gateways/newapi/data/api-key.txt"
-      [ -f "$f" ] || die "нет $f — запусти gateways/newapi/seed.sh"
+      [ -f "$f" ] || die "нет $f, запусти gateways/newapi/seed.sh"
       tr -d '[:space:]' < "$f" ;;
   esac
 }
@@ -112,8 +84,7 @@ snapshot_stats() {
 
 harness() { # harness <label> <outfile> <остальные аргументы bench.py>
   local label="$1" out="$2"; shift 2
-  # --user: иначе JSON в results/ принадлежит root, и его потом не прочитать
-  # и не удалить без sudo.
+  # --user, иначе results/ будет root'овый
   docker run --rm --network host --user "$(id -u):$(id -g)" \
     -v "$RESULTS:/out" stand-harness:1 \
     --label "$label" --out "/out/$out" "$@"
@@ -131,7 +102,7 @@ cmd_prepare() {
   wait_ready "http://127.0.0.1:9000/healthz" || die "mock-a не поднялся"
   wait_ready "http://127.0.0.1:9010/healthz" || die "mock-b не поднялся"
   mock_reset
-  echo "mock-a :9000, mock-b :9010 — готовы"
+  echo "mock-a :9000, mock-b :9010 готовы"
 }
 
 cmd_control() {
@@ -148,8 +119,6 @@ cmd_control() {
         || die "контрольный прогон упал"
     done
   done
-  # Контроль при высокой конкурентности обязателен: без него непонятно,
-  # 274 rps у гейтвея — это его потолок или потолок самого мока.
   echo "-- control/throughput/fast (conc=$CONC_HI)"
   harness "control/direct/throughput/fast" "control-direct-throughput-fast.json" \
     --url "http://127.0.0.1:9000/v1" --model mock-fast --mode stream \
@@ -158,9 +127,7 @@ cmd_control() {
     || die "контрольный пропускной прогон упал"
 }
 
-# GW_CPUS — одинаковый cpuset для всех гейтвеев, например "0-3": локально
-# изображает VDS на 4 vCPU и не даёт гейтвею конкурировать с нагрузчиком.
-# На VDS не задаётся: гейтвей там один на сервере.
+# GW_CPUS=0-3 для локальных прогонов, чтобы не делить ядра с нагрузчиком
 gw_cpu_args() { [ -n "${GW_CPUS:-}" ] && echo "--cpuset-cpus=$GW_CPUS"; }
 gw_cpu_count() {
   [ -z "${GW_CPUS:-}" ] && { nproc; return; }
@@ -173,7 +140,7 @@ up_litellm() {
   local dburl=""
   if [ "$profile" = prod ] || [ "$profile" = keys ]; then
     docker rm -f gw-litellm-db >/dev/null 2>&1 || true
-    # Порт 55432, чтобы не столкнуться с postgres, уже стоящим на хосте.
+    # на 5432 может стоять свой postgres
     docker run -d --name gw-litellm-db --network host \
       -e POSTGRES_USER=litellm -e POSTGRES_PASSWORD=litellm -e POSTGRES_DB=litellm \
       postgres:17-alpine -p 55432 -c listen_addresses=127.0.0.1 >/dev/null
@@ -184,13 +151,10 @@ up_litellm() {
     dburl="postgresql://litellm:litellm@127.0.0.1:55432/litellm"
   fi
   docker rm -f gw-litellm >/dev/null 2>&1 || true
-  # Пустой DATABASE_URL LiteLLM считает заданным и отказывается стартовать,
-  # поэтому в профиле bare переменную не передаём вовсе.
+  # пустой DATABASE_URL litellm считает заданным и падает
   local dbenv=()
   [ -n "$dburl" ] && dbenv=(-e "DATABASE_URL=$dburl")
-  # Из коробки образ стартует один воркер uvicorn. Документация для одиночной
-  # VM советует NUM_WORKERS = числу vCPU — так и делаем, иначе меряем
-  # одно ядро против Go-гейтвеев, которые сами занимают все.
+  # по умолчанию один воркер, в доке советуют по числу vCPU
   local workers="${LITELLM_WORKERS:-$(gw_cpu_count)}"
   echo "litellm: воркеров $workers"
   docker run -d --name gw-litellm --network host $(gw_cpu_args) \
@@ -205,13 +169,10 @@ up_bifrost() {
   local profile="$1" dir="$STAND/gateways/bifrost"
   local cfg="$dir/config.$profile.json"
   [ -f "$cfg" ] || die "нет конфига $cfg"
-  # Bifrost не стартует, если pricing_url недоступен, а отключить
-  # синхронизацию прайсинга нельзя (документация вендора). Поэтому
-  # датасеты лежат локально и подключаются через file://.
+  # без доступного pricing_url bifrost не стартует, отключить нельзя
   [ -s "$dir/offline/pricing.json" ] || die "нет прайсинга: запусти gateways/bifrost/offline/fetch.sh"
   docker rm -f gw-bifrost >/dev/null 2>&1 || true
-  # Каждый подъём с чистого хранилища: иначе prod стартует со следами keys.
-  # Файлы там пишет root из контейнера, поэтому и чистим контейнером.
+  # файлы там root'овые, поэтому чистим через контейнер
   docker run --rm -v "$dir:/w" alpine rm -rf /w/data >/dev/null 2>&1 || true
   mkdir -p "$dir/data"
   docker run -d --name gw-bifrost --network host $(gw_cpu_args) \
@@ -246,14 +207,10 @@ cmd_up() {
   probe="http://127.0.0.1:$port/"
   [ "$gw" = litellm ] && probe="http://127.0.0.1:$port/health/liveliness"
   wait_ready "$probe" 90 || { docker logs --tail 60 "gw-$gw"; die "$gw не поднялся"; }
-  # new-api без администратора, канала и токена не принимает запросы.
-  # Скрипт идемпотентный, при повторном подъёме ничего не дублирует.
   if [ "$gw" = newapi ]; then
     NEWAPI_FALLBACK=$([ "$profile" = fallback ] && echo 1 || echo 0) \
       bash "$STAND/gateways/newapi/seed.sh" || die "seed new-api не прошёл"
   fi
-  # LiteLLM хранит виртуальные ключи в БД, поэтому заводим ключ после старта.
-  # Значение задаём сами (маркер SENTINELVK), чтобы искать его в логах и БД.
   if [ "$gw" = litellm ] && [ "$profile" = keys ]; then
     curl -s -m 30 "http://127.0.0.1:$port/key/generate" \
       -H "Authorization: Bearer $MASTER_KEY" -H 'Content-Type: application/json' \
@@ -318,9 +275,7 @@ cmd_faults() {
     t1=$(date +%s.%N)
     code=$(printf '%s' "$body" | tail -1)
     secs=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.3f", b-a}')
-    # При обрыве код всегда 200: заголовки уже ушли. Что клиент узнал об
-    # обрыве, видно только по хвосту стрима: событие с ошибкой, [DONE]
-    # как у целого ответа, и сколько токенов из отданных апстримом дошло.
+    # код всегда 200, что дошло видно только по хвосту стрима
     local toks done_m err_ev
     toks=$(printf '%s' "$body" | sed -n 's/^data: \({.*\)$/\1/p' \
       | jq -r '.choices[0].delta.content? // empty' 2>/dev/null | grep -c . || true)
@@ -342,10 +297,6 @@ cmd_faults() {
 }
 
 cmd_saturate() {
-  # Без этой проверки числа пропускной способности публиковать нельзя:
-  # надо знать, где потолок самого стенда, и убедиться, что он выше
-  # потолка лучшего из гейтвеев. Запускать на том же сервере, где потом
-  # пойдут прогоны.
   local out="$RESULTS/saturate-control.json"
   say "насыщение стенда: контроль без гейтвея"
   mock_reset
@@ -366,14 +317,11 @@ cmd_saturate() {
     echo "  conc=$c -> $(jq -r '.[-1] | "rps=\(.rps) ttft_p50=\(.ttft_p50)"' "$out")"
   done
   echo "-> $out"
-  echo "Публикуй пропускную способность гейтвея только если она заметно ниже этого потолка."
+  echo "rps гейтвея имеет смысл, только если он заметно ниже этого"
 }
 
 cmd_fallback() {
-  # Фолбэк проверяем mock-a -> mock-b: у Alibaba rate limit считается
-  # на аккаунт, поэтому «два ключа одного провайдера» резерва не дают.
-  # Какой апстрим ответил, видно по первому токену ответа: мок подписывает
-  # себя сам, потому что гейтвеи переписывают id и режут свои заголовки.
+  # гейтвеи переписывают id и режут заголовки, поэтому мок подписывается в тексте
   local gw="$1" port key out model
   port="$(gw_port "$gw")"; key="$(gw_key "$gw" fallback)"
   out="$RESULTS/fallback-$gw.json"
@@ -383,8 +331,6 @@ cmd_fallback() {
     newapi)  model="mock-fast" ;;
   esac
   say "фолбэк: $gw (модель $model)"
-  # Поднимаем сами, с профилем fallback: в остальных профилях резервного
-  # апстрима в конфиге нет.
   cmd_up "$gw" fallback >/dev/null || die "не поднялся в профиле fallback"
   echo '[]' > "$out"
 
@@ -426,7 +372,7 @@ cmd_all() {
   for gw in litellm bifrost newapi; do
     cmd_up "$gw" "$profile" && cmd_bench "$gw" "$profile"
     cmd_security "$gw" "$profile"
-    # Отказы и фолбэк от профиля не зависят: гоняем один раз, вместе с bare.
+    # от профиля не зависят
     if [ "$profile" = bare ]; then
       cmd_faults "$gw"
       cmd_down "$gw"
